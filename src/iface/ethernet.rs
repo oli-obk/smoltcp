@@ -433,6 +433,16 @@ impl<'b, 'c, 'e, DeviceT> Interface<'b, 'c, 'e, DeviceT>
         self.inner.ip_addrs.as_ref()
     }
 
+    /// Get the first IPv4 address if present.
+    #[cfg(feature = "proto-ipv4")]
+    pub fn ipv4_addr(&self) -> Option<Ipv4Address> {
+        self.ip_addrs().iter()
+            .filter_map(|cidr| match cidr.address() {
+                IpAddress::Ipv4(addr) => Some(addr),
+                _ => None,
+            }).next()
+    }
+
     /// Update the IP addresses of the interface.
     ///
     /// # Panics
@@ -698,7 +708,7 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
 
     fn check_ip_addrs(addrs: &[IpCidr]) {
         for cidr in addrs {
-            if !cidr.address().is_unicast() {
+            if !cidr.address().is_unicast() && !cidr.address().is_unspecified() {
                 panic!("IP address {} is not unicast", cidr.address())
             }
         }
@@ -840,10 +850,8 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
             match raw_socket.process(&ip_repr, ip_payload, &checksum_caps) {
                 // The packet is valid and handled by socket.
                 Ok(()) => handled_by_raw_socket = true,
-                // The socket buffer is full.
-                Err(Error::Exhausted) => (),
-                // Raw sockets don't validate the packets in any way.
-                Err(_) => unreachable!(),
+                // The packet cannot be handled
+                Err(_) => (),
             }
         }
         handled_by_raw_socket
@@ -876,12 +884,13 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
         let ip_payload = ipv6_packet.payload();
 
         #[cfg(feature = "socket-raw")]
-        let handled_by_raw_socket = self.raw_socket_filter(sockets, &ipv6_repr.into(), ip_payload);
-        #[cfg(not(feature = "socket-raw"))]
-        let handled_by_raw_socket = false;
+        {
+            if self.raw_socket_filter(sockets, &ipv6_repr.into(), ip_payload) {
+                return Ok(Packet::None);
+            }
+        }
 
-        self.process_nxt_hdr(sockets, timestamp, ipv6_repr, ipv6_repr.next_header,
-                             handled_by_raw_socket, ip_payload)
+        self.process_nxt_hdr(sockets, timestamp, ipv6_repr, ipv6_repr.next_header, ip_payload)
     }
 
     /// Given the next header value forward the payload onto the correct process
@@ -889,7 +898,7 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
     #[cfg(feature = "proto-ipv6")]
     fn process_nxt_hdr<'frame>
                    (&mut self, sockets: &mut SocketSet, timestamp: Instant, ipv6_repr: Ipv6Repr,
-                    nxt_hdr: IpProtocol, handled_by_raw_socket: bool, ip_payload: &'frame [u8])
+                    nxt_hdr: IpProtocol, ip_payload: &'frame [u8])
                    -> Result<Packet<'frame>>
     {
         match nxt_hdr {
@@ -905,11 +914,7 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
                 self.process_tcp(sockets, timestamp, ipv6_repr.into(), ip_payload),
 
             IpProtocol::HopByHop =>
-                self.process_hopbyhop(sockets, timestamp, ipv6_repr, handled_by_raw_socket, ip_payload),
-
-            #[cfg(feature = "socket-raw")]
-            _ if handled_by_raw_socket =>
-                Ok(Packet::None),
+                self.process_hopbyhop(sockets, timestamp, ipv6_repr, ip_payload),
 
             _ => {
                 // Send back as much of the original payload as we can.
@@ -973,6 +978,10 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
         }
 
         match ipv4_repr.protocol {
+            #[cfg(feature = "socket-raw")]
+            _ if handled_by_raw_socket =>
+                Ok(Packet::None),
+
             IpProtocol::Icmp =>
                 self.process_icmpv4(sockets, ip_repr, ip_payload),
 
@@ -987,10 +996,6 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
             #[cfg(feature = "socket-tcp")]
             IpProtocol::Tcp =>
                 self.process_tcp(sockets, timestamp, ip_repr, ip_payload),
-
-            #[cfg(feature = "socket-raw")]
-            _ if handled_by_raw_socket =>
-                Ok(Packet::None),
 
             _ => {
                 // Send back as much of the original payload as we can.
@@ -1173,8 +1178,7 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
 
     #[cfg(feature = "proto-ipv6")]
     fn process_hopbyhop<'frame>(&mut self, sockets: &mut SocketSet, timestamp: Instant,
-                                ipv6_repr: Ipv6Repr, handled_by_raw_socket: bool,
-                                ip_payload: &'frame [u8]) -> Result<Packet<'frame>>
+                                ipv6_repr: Ipv6Repr, ip_payload: &'frame [u8]) -> Result<Packet<'frame>>
     {
         let hbh_pkt = Ipv6HopByHopHeader::new_checked(ip_payload)?;
         let hbh_repr = Ipv6HopByHopRepr::parse(&hbh_pkt)?;
@@ -1199,7 +1203,7 @@ impl<'b, 'c, 'e> InterfaceInner<'b, 'c, 'e> {
             }
         }
         self.process_nxt_hdr(sockets, timestamp, ipv6_repr, hbh_repr.next_header,
-                             handled_by_raw_socket, &ip_payload[hbh_repr.buffer_len()..])
+                             &ip_payload[hbh_repr.buffer_len()..])
     }
 
     #[cfg(feature = "proto-ipv4")]
@@ -2195,7 +2199,7 @@ mod test {
             dst_addr: src_addr,
             protocol: IpProtocol::Icmp,
             hop_limit: 64,
-            payload_len: expected_icmpv4_repr.buffer_len()
+            payload_len: expected_icmp_repr.buffer_len()
         };
 
         // The expected packet does not exceed the IPV4_MIN_MTU
