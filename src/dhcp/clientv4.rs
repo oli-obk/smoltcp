@@ -261,7 +261,6 @@ impl Client {
         }
 
         // Prepare sending next packet
-        self.transaction_id += 1;
         let mac = iface.ethernet_addr();
 
         let mut dhcp_repr = DhcpRepr {
@@ -346,6 +345,7 @@ impl Client {
     pub fn reset(&mut self, now: Instant) {
         net_trace!("DHCP reset");
         self.state = ClientState::Discovering;
+        self.transaction_id += 1;
         self.next_egress = now;
     }
 }
