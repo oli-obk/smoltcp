@@ -251,7 +251,7 @@ impl Client {
     }
 
     fn egress<DeviceT: for<'d> Device<'d>>(&mut self, iface: &mut Interface<DeviceT>, raw_socket: &mut RawSocket, checksum_caps: &ChecksumCapabilities, now: Instant) -> Result<Option<Config>> {
-        println!("DHCP egress");
+        net_debug!("DHCP egress");
         // Reset after maximum amount of retries
         let retries_exceeded = match self.state {
             ClientState::Requesting(ref mut r_state) if r_state.retry >= REQUEST_RETRIES => {
@@ -396,11 +396,11 @@ fn send_packet<DeviceT: for<'d> Device<'d>>(iface: &mut Interface<DeviceT>, raw_
         hop_limit: 64,
     };
 
-    println!("Want {} bytes", ipv4_repr.buffer_len() + udp_repr.buffer_len());
+    net_debug!("Want {} bytes", ipv4_repr.buffer_len() + udp_repr.buffer_len());
     let mut packet = raw_socket.send(
         ipv4_repr.buffer_len() + udp_repr.buffer_len()
     )?;
-    println!("Got {} bytes", ipv4_repr.buffer_len() + udp_repr.buffer_len());
+    net_debug!("Got {} bytes", ipv4_repr.buffer_len() + udp_repr.buffer_len());
     {
         let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut packet);
         ipv4_repr.emit(&mut ipv4_packet, &checksum_caps);
